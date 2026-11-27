@@ -88,5 +88,5 @@ One sequence only; known intrinsics assumed; needs a moving scene; not real-time
   the one-line idea first, then the code location.
 - AI use is allowed in this course, but everyone must understand and be able to
   present the method. Prefer explaining over just changing code.
-- Commit on a branch and open a PR; the repo (github.com/dbcometto/multi_camera_calibration) is public and owned by Dante.
+- The team works directly on `main`, each person in their own folder. The repo (github.com/dbcometto/multi_camera_calibration) is public and owned by Dante; only change files outside your folder after asking.
 - Never commit `data/`, paper PDFs, or `__pycache__/` (already in `.gitignore`).
