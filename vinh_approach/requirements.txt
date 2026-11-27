@@ -1,0 +1,4 @@
+opencv-python>=4.5   # SIFT + USAC; tested with 4.6.0
+numpy
+scipy               # least_squares for refinement + bundle adjustment
+matplotlib
