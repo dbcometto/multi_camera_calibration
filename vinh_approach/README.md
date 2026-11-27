@@ -1,207 +1,242 @@
-# Vinh's Approach — Targetless Extrinsic Calibration (Project 3)
+# Vinh's Approach: Finding Where Cameras Are, Without a Checkerboard
 
-EECE 7150 AFR Group 1 — Project 3: *Calibration on the fly (extrinsics), Camera–Camera → nCamera*
+EECE 7150, AFR Group 1, Project 3: Calibration on the fly (extrinsics), Camera to Camera, then many cameras.
 Presentation: **12/02/2026**
 
-## Purpose
+## The problem
 
-Find where every camera is (rotation **R**, translation **t**) relative to the
-others **without a calibration target** (no checkerboard), using only what the
-cameras see, and keep improving the answer as new frames arrive ("on the fly").
-Start with 2 cameras, then extend to n cameras.
+We have many cameras looking at the same room. We want to know **where each
+camera is** and **which way it is pointing**.
 
-## Results at a glance
+The usual way is to hold a checkerboard in front of the cameras. We do **not**
+use a checkerboard. We only use what the cameras normally see: the walls, the
+floor, and a person moving around. The answer should also get better the
+longer the cameras watch. That is what "on the fly" means.
 
-CMU Panoptic `171026_pose1`, **12 HD cameras** (1920×1080), 1 frame per second,
-compared with the dataset's ground-truth calibration.
+## The result
 
-| What | Result |
+We tested on 12 cameras in a dome at Carnegie Mellon (the CMU Panoptic
+dataset). The dataset also gives the true camera positions, so we can check
+how close we are.
+
+| What we measured | Result |
 |---|---|
-| Cameras calibrated | **12 / 12** (all of them) |
-| Mean rotation error | **0.050°** (with bundle adjustment), 0.178° without |
-| Mean camera position error | **0.56 cm** with BA, 0.37 cm without (cameras are 1.2–5.4 m apart) |
-| Reprojection error after BA | median **0.33 px** |
-| Frames needed | 5 s of video → first 3 cameras; **13 s → all 12 cameras** |
-| Metric information used | **one** known distance between two cameras (sets the scale) |
-| Runtime | ~4 min once (SIFT + matching, cached), then ~55 s per full run on a laptop CPU |
+| Cameras found | **12 out of 12** |
+| How far off the pointing direction is | **0.05 degrees** on average |
+| How far off the camera position is | **less than 1 cm**, for cameras 1.2 to 5.4 m apart |
+| How much video it needs | **13 seconds** to find all 12 cameras |
+| Real measurement we give it | only **one** distance between two cameras |
 
-Two-camera, one frame only vs. pooled over time (rotation error vs. ground truth):
+## How it works, in 6 steps
 
-| Camera pair | 1 frame | all 53 frames |
-|---|---|---|
-| 00_01 – 00_04 | 0.13° | **0.01°** |
-| 00_00 – 00_29 | 0.07° | **0.01°** |
-| 00_01 – 00_03 | 1.18° | **0.06°** |
-| 00_02 – 00_03 (hard) | 93° (wrong) | **0.31°** (correct from frame 16 on) |
+### Step 1: Find the same spots in two cameras
 
-## Pipeline
+The computer looks for small spots that stand out in each picture, like the
+corner of a wall panel or a logo on a shirt. Then it pairs them up: "this spot
+in camera A is the same spot in camera B."
 
-```
- CMU Panoptic: synced videos + K, distortion (inputs) + R, t (ground truth, evaluation only)
-        │
- 1. Load frames (1 per second), undistort keypoints with K + distortion
- 2. SIFT (contrast threshold 0.01) + FLANN, Lowe ratio test 0.75 + mutual check
- 3. Two-view pose: 5-point essential matrix + RANSAC (Nistér), recoverPose
-        → non-linear refinement of R, t on inliers (Sampson error)
- 4. ON THE FLY: every new frame adds matches to the pool → re-estimate;
-        keep the previous estimate if it still explains the pool better
- 5. Camera graph: inlier gates → triangle check → max spanning tree → loop check
-        (removes wrong camera pairs without using ground truth)
- 6. Multi-camera tracks (union-find, per frame) → seed pair (scale = 1 baseline)
-        → add cameras one by one with PnP + RANSAC → triangulate
-        → bundle adjustment after each camera and at the end
- 7. Evaluation against ground truth: rotation (°), position (cm), reprojection (px)
-```
+![Matched spots between two cameras](results/matches_00_00_00_29.jpg)
 
-### Why each step is there (what we found)
+### Step 2: Work out where camera B is compared to camera A
 
-1. **One frame is not enough.** The dome walls are plain and repetitive and the
-   cameras are far apart, so one frame gives only ~10–70 good matches per pair.
-   Only cameras next to each other work from a single frame
-   (`results/two_view/`).
-2. **Pooling frames over time fixes it.** The person moves, so every frame adds
-   new 3D points. Plain pooling beat removing repeated background matches.
-3. **Refinement + "keep the better estimate" make it stable.** RANSAC alone gave
-   answers that jumped by up to 100° between updates; with these two steps the
-   curves in `online_pairs.png` settle smoothly.
-4. **Wrong camera pairs must be removed.** 37 of the 66 pairs are wrong
-   (> 5° vs ground truth), mostly cameras that face each other and see different
-   walls. Some wrong pairs still have many inliers (repeated wall texture), so an
-   inlier count alone can't filter them. The **triangle/loop rotation check**
-   (pair rotations must agree around triangles of cameras) does:
-   - 54 pairs pass the inlier gates (25 of them wrong)
-   - **30 kept (1 wrong, only 5.3° off), 24 rejected (all 24 truly wrong, 0 good ones lost)**
-5. **Bundle adjustment** lowers rotation error ~3.5× (0.18° → 0.05°).
-   Position error stays below 1 cm either way; the differences (0.37 vs 0.56 cm)
-   are likely at the accuracy level of the ground truth itself, so we do not
-   claim BA improves position.
-   *Bug found on the way:* a Huber loss from the start barely moved the
-   solution (32 → 23 px). Plain least squares, then dropping observations > 3 px
-   and solving again, converges properly (32 → 0.7 px from a perturbed start).
-6. **Scale.** Images alone can't tell size, so one known camera-to-camera
-   distance is used (the seed pair). Everything else is in cm automatically
-   through PnP.
+If you know where the same spots appear in both pictures, there is only one way
+the two cameras can be placed to explain it. The computer finds that placement.
 
-## Figures (in `results/`)
+Some pairs of spots are wrong. So the computer tries many small random groups of
+spots and keeps the answer that most spots agree with. Wrong spots get ignored.
 
-| File | Shows |
+One picture cannot tell size. A big room far away looks the same as a small
+room close up. So at this point we know the direction to the other camera, but
+not the distance.
+
+### Step 3: Get better with every new frame ("on the fly")
+
+From only one picture, cameras that are far apart find very few matching spots.
+The dome walls are plain and look the same everywhere.
+
+But the person in the room keeps moving. Every new frame gives new spots. We
+keep adding them and recompute the answer each time. We also keep the old
+answer if it still fits better, so the result stays steady and does not jump
+around.
+
+![Error goes down as more frames come in](results/online_pairs.png)
+
+The green line is a hard pair of cameras. It starts very wrong, and after 16
+seconds it becomes correct.
+
+### Step 4: Throw away wrong camera pairs
+
+12 cameras make 66 pairs. More than half of them give wrong answers, mostly
+cameras on opposite sides of the dome that see different walls.
+
+To catch them, we use a simple rule with three cameras A, B and C:
+
+> Turning from A to B, then from B to C, must be the same as turning from A to C directly.
+
+If a pair breaks this rule, it is wrong and we drop it. We never look at the
+true answer to do this.
+
+![Kept pairs in blue, dropped pairs in red](results/camera_graph.png)
+
+Later we checked against the true answer: every pair we dropped really was
+wrong, and we did not drop any good pair.
+
+### Step 5: Put all cameras together
+
+1. Start with the best pair of cameras. Give it **one real distance** (125 cm) so everything has the right size.
+2. Use those two cameras to find where the matching spots are in 3D.
+3. Add the next camera by asking: "where must this camera be to see these 3D spots the way it does?"
+4. Repeat until all 12 cameras are placed.
+
+### Step 6: Fine tune everything together
+
+Small errors add up as cameras are added. So at the end, the computer nudges
+all cameras and all 3D spots at the same time, until every spot lines up with
+where it was really seen in each picture (to about one third of a pixel).
+
+![Our cameras (blue) sit inside the true positions (orange)](results/cameras_3d.png)
+
+The grey dots are the 3D spots we rebuilt: the round dome wall and the person in the middle.
+
+## How much video does it need?
+
+| Seconds of video | Cameras found |
 |---|---|
-| `matches_00_00_00_29.jpg` | verified SIFT matches between two neighbouring cameras (one frame) |
-| `online_pairs.png` | **two-camera on the fly**: error vs frames seen for 4 pairs |
-| `online_ncam.png` | **n cameras on the fly**: cameras calibrated and error vs frames seen |
-| `camera_graph.png` | top view of the 12 cameras, kept pairs (blue) vs rejected (red dashed) |
-| `cameras_3d.png` | estimated cameras inside the ground-truth circles + 37k triangulated points (dome walls + person) |
-| `per_camera_error.png` | rotation / position error per camera, with vs without bundle adjustment |
-| `two_view/` | single-frame demo for 5 cameras (shows why one frame isn't enough) |
-| `pipeline_result.json`, `*.csv` | the numbers behind everything |
+| 1 to 3 | 0 (not enough matching spots yet) |
+| 5 | 3 |
+| 8 | 5 |
+| 13 or more | **all 12** |
 
-## How to run
+Each camera is already accurate as soon as it is found. More video lets more cameras join.
 
-From the `vinh_approach/` folder (Python 3, see `requirements.txt`):
+![Cameras found and error vs seconds of video](results/online_ncam.png)
+
+## Things we learned
+
+1. **One frame is not enough** when cameras are far apart. Watching for a few seconds fixes it.
+2. **Recomputing from scratch each frame makes the answer jump.** Polishing the answer and keeping the better one makes it steady.
+3. **Some wrong pairs look very confident**, because the walls repeat the same pattern. Counting matches does not catch them. The three camera rule does.
+4. **The final fine tuning had a bug at first** and barely moved anything. After fixing it, the pointing error dropped from 0.18 to 0.05 degrees.
+
+## Limits
+
+* We tested on one recording only.
+* We assume each camera's lens settings are already known (the project allows this).
+* The scene must have something moving. A completely still room gives the same spots every frame.
+* It is not live yet. Each update recomputes everything.
+* Cameras that face each other across the room cannot be paired directly. They are connected through the cameras between them.
+
+## How to run it
+
+Open a terminal in this `vinh_approach` folder.
 
 ```bash
-# 0. Data: 12 cameras, first ~55 s each, + ground truth (~2 GB, ~2 min)
-python3 scripts/download_panoptic.py          # default = the 12 cameras used here
+# Install the libraries
+pip install -r requirements.txt
 
-# 1-3. Single-frame two-camera demo (5 cameras, ~3 s)
+# Download the data (12 cameras, about 2 GB, about 2 minutes)
+python3 scripts/download_panoptic.py
+
+# Run the full 12 camera calibration
+# (first time about 5 minutes, after that about 1 minute)
+python3 scripts/run_pipeline.py
+
+# Use only the first 10 seconds of video
+python3 scripts/run_pipeline.py --frames 10
+
+# Small demo: two cameras, one frame
 python3 scripts/run_two_view.py
 
-# Full n-camera pipeline (first run also builds the SIFT/match cache, ~4 min)
-python3 scripts/run_pipeline.py
-python3 scripts/run_pipeline.py --frames 10     # use only the first 10 frames
+# "On the fly" experiments and their charts
+python3 scripts/run_online.py --part A     # pairs of cameras, about 30 seconds
+python3 scripts/run_online.py --part B     # all cameras, about 8 minutes
 
-# On-the-fly experiments + figures
-python3 scripts/run_online.py --part A          # pairs, ~30 s
-python3 scripts/run_online.py --part B          # all cameras vs #frames, ~8 min
-python3 scripts/make_figures.py                 # graph, 3D, per-camera, matches
+# Make the pictures for the slides
+python3 scripts/make_figures.py
 ```
 
-## Code map
+All pictures and numbers are saved in `results/`.
 
-| Step | File | Main tools |
-|---|---|---|
-| 0 | `scripts/download_panoptic.py` | partial HTTP download, frame extraction |
-| 1 | `src/data_loader.py` | calibration JSON, `cv2.undistortPoints` |
-| 2 | `src/features.py`, `src/cache.py` | `cv2.SIFT_create`, FLANN, ratio + mutual check, multiprocessing cache |
-| 3 | `src/two_view.py` | `cv2.findEssentialMat` (5-point RANSAC), `cv2.recoverPose`, Sampson refinement |
-| 4 | `src/online.py` | `OnlinePair`: add frame → update → keep better |
-| 5 | `src/pose_graph.py` | inlier gates, triangle check, spanning tree, loop check |
-| 6 | `src/sfm.py`, `src/bundle_adjustment.py` | union-find tracks, DLT triangulation, `cv2.solvePnPRansac`, `scipy.optimize.least_squares` |
-| 7 | `src/metrics.py` | rotation / position / translation-direction errors |
-| plots | `src/plots.py`, `scripts/make_figures.py`, `scripts/run_online.py` | matplotlib |
+## Which file does what
 
-## Limitations / honest notes
-
-- **Ground truth is used only for evaluation** — plus one baseline length for
-  scale. Intrinsics (K, distortion) are assumed known, as the project allows.
-- Cameras with no overlapping view of anything (facing each other across the
-  dome) can't be paired directly; they are connected through neighbours.
-  This is why we picked 12 cameras forming a connected ring.
-- Needs a few seconds of a moving scene; a fully static scene would give the
-  same matches every frame and pooling would add little.
-- One sequence only; the Panoptic ground truth is itself an estimate, so
-  sub-centimetre differences are not meaningful.
-- Not real-time as written (full re-run per update); the online pair update is
-  cheap, the n-camera step would need incremental BA to be truly live.
+| Step | File |
+|---|---|
+| Download data | `scripts/download_panoptic.py` |
+| Load pictures and lens settings | `src/data_loader.py` |
+| Step 1: find and match spots | `src/features.py`, `src/cache.py` (saves results so it only runs once) |
+| Step 2: place camera B from camera A | `src/two_view.py` |
+| Step 3: improve with each frame | `src/online.py` |
+| Step 4: drop wrong pairs | `src/pose_graph.py` |
+| Step 5: put all cameras together | `src/sfm.py` |
+| Step 6: fine tune | `src/bundle_adjustment.py` |
+| Check against the true answer | `src/metrics.py` |
 
 ## Folder layout
 
 ```
 vinh_approach/
 │
-├── README.md            📖 for humans: full explanation (this file)
+├── README.md            📖 for people: this explanation
 ├── CLAUDE.md            🤖 for Claude Code: teammates' Claude gets the project instantly
 ├── requirements.txt     libraries to install
-├── .gitignore           keeps data, PDFs and cache files off GitHub
+├── .gitignore           keeps data, PDFs and temporary files off GitHub
 │
-├── papers/              📄 reading (PDFs local only)
+├── papers/              📄 reading (PDFs stay on your computer only)
 │   ├── Nister2003_five_point_relative_pose.pdf       main method
-│   ├── Carrera2011_SLAM_multicamera_calibration.pdf  related work
+│   ├── Carrera2011_SLAM_multicamera_calibration.pdf  similar past work
 │   └── README.md
 │
-├── data/                💾 dataset (local only, 2.5 GB)
+├── data/                💾 dataset (stays on your computer only, 2.5 GB)
 │   ├── README.md
-│   └── 171026_pose1/    calibration JSON + videos/ + frames/ + cache/
+│   └── 171026_pose1/    true camera positions + videos + pictures + saved results
 │
 ├── src/                 🧠 HOW it works (one file per step)
-│   ├── data_loader.py        1  load frames + calibration
-│   ├── features.py           2  SIFT + matching
-│   ├── cache.py              2  save features, reuse
-│   ├── two_view.py           3  pose between 2 cameras
-│   ├── online.py             4  on the fly
-│   ├── pose_graph.py         5  remove wrong pairs
-│   ├── sfm.py                6  join all cameras
-│   ├── bundle_adjustment.py  6  fine-tune
-│   ├── metrics.py            7  compare with ground truth
-│   └── plots.py                 figure style
+│   ├── data_loader.py        load pictures and lens settings
+│   ├── features.py           step 1  find and match spots
+│   ├── cache.py              step 1  save results, reuse them
+│   ├── two_view.py           step 2  place camera B from camera A
+│   ├── online.py             step 3  improve with each frame
+│   ├── pose_graph.py         step 4  drop wrong pairs
+│   ├── sfm.py                step 5  put all cameras together
+│   ├── bundle_adjustment.py  step 6  fine tune
+│   ├── metrics.py                    check against the true answer
+│   └── plots.py                      chart style
 │
 ├── scripts/             ▶️ WHAT you run
 │   ├── download_panoptic.py  get the data
-│   ├── run_two_view.py       2-camera, single-frame demo
-│   ├── run_pipeline.py       full 12-camera calibration
-│   ├── run_online.py         accuracy vs. frames experiments
-│   └── make_figures.py       figures for the slides
+│   ├── run_two_view.py       small demo: two cameras, one frame
+│   ├── run_pipeline.py       full 12 camera calibration
+│   ├── run_online.py         "on the fly" experiments
+│   └── make_figures.py       pictures for the slides
 │
 └── results/             📊 WHAT you show
-    ├── online_pairs.png        on the fly, 2 cameras
-    ├── online_ncam.png         on the fly, 12 cameras
-    ├── camera_graph.png        kept vs. rejected pairs
-    ├── cameras_3d.png          estimate vs. ground truth in 3D
-    ├── per_camera_error.png    error per camera
-    ├── matches_00_00_00_29.jpg matched points example
+    ├── online_pairs.png        on the fly, two cameras
+    ├── online_ncam.png         on the fly, all 12 cameras
+    ├── camera_graph.png        kept pairs and dropped pairs
+    ├── cameras_3d.png          our cameras vs the true positions
+    ├── per_camera_error.png    error for each camera
+    ├── matches_00_00_00_29.jpg example of matched spots
     ├── *.csv, pipeline_result.json   the numbers
-    └── two_view/               single-frame demo (10 images + CSV)
+    └── two_view/               small demo pictures
 ```
 
-## References
+## Words you may hear in the presentation
 
-Main method and comparison (PDFs in `papers/`):
-- D. Nistér, "An Efficient Solution to the Five-Point Relative Pose Problem", CVPR 2003 / IEEE TPAMI 2004 — two-view pose (step 3).
-- G. Carrera, A. Angeli, A. J. Davison, "SLAM-Based Automatic Extrinsic Calibration of a Multi-Camera Rig", ICRA 2011 — related work: on-the-fly multi-camera calibration via SLAM.
+| Word | Plain meaning |
+|---|---|
+| Extrinsics | where a camera is and which way it points |
+| SIFT | the method that finds spots that stand out in a picture |
+| RANSAC | try many small random groups, keep the answer most agree with |
+| Essential matrix | the math that links matching spots in two cameras |
+| Triangulation | two cameras see a spot, so we can find where it is in 3D |
+| PnP | place a new camera from 3D spots it can see |
+| Bundle adjustment | the final fine tuning of everything together |
 
-Tools used:
-- D. Lowe, "Distinctive Image Features from Scale-Invariant Keypoints" (SIFT), IJCV 2004.
-- M. Fischler, R. Bolles, "Random Sample Consensus" (RANSAC), 1981.
-- B. Triggs et al., "Bundle Adjustment — A Modern Synthesis", 2000.
-- R. Hartley, A. Zisserman, *Multiple View Geometry in Computer Vision*.
-- H. Joo et al., "Panoptic Studio", ICCV 2015 — dataset.
+## Papers
+
+* D. Nistér, "An Efficient Solution to the Five-Point Relative Pose Problem", CVPR 2003. This is how we do step 2.
+* G. Carrera, A. Angeli, A. J. Davison, "SLAM-Based Automatic Extrinsic Calibration of a Multi-Camera Rig", ICRA 2011. Similar past work to compare with.
+* D. Lowe, SIFT, 2004. Finding spots (step 1).
+* M. Fischler and R. Bolles, RANSAC, 1981. Ignoring wrong matches (step 2).
+* B. Triggs and others, "Bundle Adjustment: A Modern Synthesis", 2000. Fine tuning (step 6).
+* H. Joo and others, "Panoptic Studio", ICCV 2015. The dataset.
